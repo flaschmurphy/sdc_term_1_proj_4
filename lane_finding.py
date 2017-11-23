@@ -211,7 +211,7 @@ def pipeline(img, dest='./output_images', fname=None, cmap='BGR'):
         cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'withlines.jpg')), unwarped_withlines); i+=1
 
     # Add the descriptddive text to the main result image
-    txt = 'Left Curvature: {:4}m | Right Curvature: {:4}m'.format(int(left_curve_rad), int(right_curve_rad))
+    txt = 'Left Curvature: {:5}m | Right Curvature: {:5}m'.format(int(left_curve_rad), int(right_curve_rad))
     params = (unwarped_withlines, txt, (25, 50), 1, (255, 255, 255), 2)
     unwarped_withlines = add_text(params)
 
@@ -702,12 +702,13 @@ def find_lane_lines(binary_warped, orig):
         # This function takes no args as all the data it needs are contained in the parent function
         # (so no globals needed either)
 
+        get_dx_left = lambda: np.mean( 2*poly_left[0]*ploty + poly_left[1] )
+        get_dx_right = lambda: np.mean( 2*poly_right[0]*ploty + poly_right[1] )
+
         # On the 1st image in the video there will be no history
         if 'previous_dx_left' not in find_lane_lines.__dict__:
-            dx_left = np.mean( 2*poly_left[0]*ploty + poly_left[1] )
-            dx_right = np.mean( 2*poly_right[0]*ploty + poly_right[1] )
-            find_lane_lines.previous_dx_left = dx_left
-            find_lane_lines.previous_dx_right = dx_right
+            find_lane_lines.previous_dx_left = get_dx_left()
+            find_lane_lines.previous_dx_right = get_dx_right()
             return 'LEFTRIGHT'
             
         # Configure some thresholds to test against. If any of these numbers are breached
@@ -718,8 +719,8 @@ def find_lane_lines(binary_warped, orig):
         right_tollerance_past = 1
 
         # Calculate the rate of change of left and right lanes  (x wrt y)
-        dx_left = np.mean( 2*poly_left[0]*ploty + poly_left[1] )
-        dx_right = np.mean( 2*poly_right[0]*ploty + poly_right[1] )
+        dx_left = np.mean(get_dx_left())
+        dx_right = np.mean(get_dx_right())
 
         # Now check if we breached any of the thresholds
         ret = ''
@@ -773,34 +774,61 @@ def find_lane_lines(binary_warped, orig):
         find_lane_lines.previous['poly_right'] = poly_right
 
 
-    # Setup a placeholder for ploty
+    def get_avg_polys():
+        # Get two polynomials taking into account the history of pevious images
+
+        history_length = 10
+
+        # Remove the earliest stored sample if needed and append this new one instead
+        if 'poly_left' in pipeline.__dict__:
+            if len(pipeline.poly_left) == history_length:
+                pipeline.poly_left.pop(0)
+                pipeline.poly_right.pop(0)
+        else:
+            pipeline.poly_left = []
+            pipeline.poly_right = []
+
+        poly_left = np.polyfit(lefty, leftx, 2)
+        poly_right = np.polyfit(righty, rightx, 2)
+
+        pipeline.poly_left.append(poly_left)
+        pipeline.poly_right.append(poly_right)
+
+        poly_left = np.mean(pipeline.poly_left, axis=0)
+        poly_right = np.mean(pipeline.poly_right, axis=0)
+
+        return poly_left, poly_right
+
+
     ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0])
 
     # If is the first image in the video, or the sanity check on the basic 
     # parse fails, process the entire image
     if 'previous' not in find_lane_lines.__dict__:
-        line_search_img, leftx, lefty, rightx, righty, \
-                poly_left, poly_right = get_polys_full(binary_warped)
+        line_search_img, leftx, lefty, rightx, righty = get_polys_full(binary_warped)
+        poly_left, poly_right = get_avg_polys()
         store_results()
+
 
     # If we have past data, just scan around the margins of the new image 
     # for lane lines instead of processing the entire image. There doesn't seem
     # to be much of a speedup in computation with this, but the stability of 
     # the lane detection improves.
     else:
-        leftx, lefty, rightx, righty, poly_left, poly_right = get_polys_margin(
+        leftx, lefty, rightx, righty = get_polys_margin(
              binary_warped, 
              find_lane_lines.previous['poly_left'],
              find_lane_lines.previous['poly_right']
         )
+        poly_left, poly_right = get_avg_polys()
         line_search_img = find_lane_lines.previous['line_search_img']
 
         # Now run the sanity check and figure out what to do
         if sanity_check() == 'PASS':
             store_results()
         else:
-            line_search_img, leftx, lefty, rightx, righty, \
-                    poly_left, poly_right = get_polys_full(binary_warped)
+            line_search_img, leftx, lefty, rightx, righty = get_polys_full(binary_warped)
+            poly_left, poly_right = get_avg_polys()
 
             check = sanity_check()
             if check != 'PASS':
@@ -823,63 +851,9 @@ def find_lane_lines(binary_warped, orig):
                     print('Full scan worked!')
                 store_results()
 
-
-    # Find the radius of curvature in real world dimensions. We are using
-    # a hard coded dimension conversion here for simplicity (`ym_per_pix` and
-    # `xm_per_pix`) but in a real system it would be necessary to use some
-    # kind of markers in the image that are of known dimensions. This is needed for
-    # example to handle cases where the road is ascending or descending a hill.
-    # 
-    # Define conversions in x and y from pixels space to meters. These are assumed values based 
-    # on US regulations for lane sizes & road markings, and assume that all images are of flat 
-    # terrain (not necessarily the case, but good enough for this project).
-    ym_per_pix = 30/720  # meters per pixel in y dimension
-    xm_per_pix = 3.7/750 # meters per pixel in x dimension
-
-    # Now we can get the distance from center in meters
-    true_center = binary_warped.shape[1] / 2
-    cur_center = rightx[0] - leftx[0] 
-    dist_from_center_px = true_center - cur_center
-    dist_from_center = dist_from_center_px * xm_per_pix
-
-    # Fit new polynomials to x,y in real world space
-    poly_left_cr = np.polyfit( lefty * ym_per_pix, leftx * xm_per_pix, 2 )
-    poly_right_cr = np.polyfit( righty * ym_per_pix, rightx * xm_per_pix, 2 )
-
-    # Calculate the new radii of curvature
-    y_eval = np.max(lefty)
-
-    # Calculate radius of curvature in meters
-    left_curve_rad = (((1 + (2*poly_left_cr[0]*y_eval*ym_per_pix + \
-            poly_left_cr[1])**2)**1.5) / np.absolute(2*poly_left_cr[0]))
-    right_curve_rad = (((1 + (2*poly_right_cr[0]*y_eval*ym_per_pix + \
-            poly_right_cr[1])**2)**1.5) / np.absolute(2*poly_right_cr[0]))
-
-    # Add lines to the output image showing the lanes
+    # Create lines for the output image showing the lanes
     left_fitx = poly_left[0]*ploty**2 + poly_left[1]*ploty + poly_left[2]
     right_fitx = poly_right[0]*ploty**2 + poly_right[1]*ploty + poly_right[2]
-
-    # Manage a history of values to average over
-    history_length = 100
-
-    # Pop off the earliest stored example if there's one there and append this one
-    if 'left_fit_hist' in pipeline.__dict__:
-        if len(pipeline.left_fit_history) == history_length:
-            pipeline.left_fit_history.pop(0)
-            pipeline.right_fit_history.pop(0)
-    else:
-        pipeline.left_fit_history = []
-        pipeline.right_fit_history = []
-
-    pipeline.left_fit_history.append(left_fitx)
-    pipeline.right_fit_history.append(right_fitx)
-
-    # Take the mean and return that instead of just what we got from the current image
-    left_fitx = np.mean(pipeline.left_fit_history, axis=0)
-    right_fitx = np.mean(pipeline.right_fit_history, axis=0)
-
-    lefty = lefty[:leftx.shape[0]]
-    righty = righty[:rightx.shape[0]]
 
     # Create an image to draw the lines on
     warp_zero = np.zeros_like(binary_warped).astype(np.uint8)
@@ -892,6 +866,46 @@ def find_lane_lines(binary_warped, orig):
 
     # Draw the lane onto the warped blank image
     cv2.fillPoly(color_warp, np.int_([pts]), (0, 255, 0))
+
+    ###########################################################################################
+    #
+    # Calculate real world measurements
+    #
+    #
+    # Find the radius of curvature in real world dimensions. We are using a hard
+    # coded dimension conversion here for simplicity (`ym_per_pix` and `xm_per_pix`)
+    # but in a real system it would be necessary to use some kind of markers in the
+    # image that are of known dimensions. This is needed for example to handle cases
+    # where the road is ascending or descending a hill.
+    # 
+    # Define conversions in x and y from pixels space to meters. These are assumed
+    # values based on US regulations for lane sizes & road markings, and assume that
+    # all images are of flat terrain (not necessarily the case, but good enough for
+    # this project).
+    #
+    ym_per_pix = 30/720  # meters per pixel in y dimension
+    xm_per_pix = 3.7/750 # meters per pixel in x dimension
+
+    # Now we can get the distance from center in meters
+    true_center = binary_warped.shape[1] / 2
+    cur_center = rightx[0] - leftx[0] 
+    dist_from_center_px = true_center - cur_center
+    dist_from_center = dist_from_center_px * xm_per_pix
+
+    poly_left_cr = np.polyfit( lefty * ym_per_pix, leftx * xm_per_pix, 2 )
+    poly_right_cr = np.polyfit( righty * ym_per_pix, rightx * xm_per_pix, 2 )
+
+    # Calculate the new radii of curvature
+    y_eval = np.max(lefty)
+
+    # Calculate radius of curvature in meters
+    left_curve_rad = (((1 + (2*poly_left_cr[0]*y_eval*ym_per_pix + \
+            poly_left_cr[1])**2)**1.5) / np.absolute(2*poly_left_cr[0]))
+    right_curve_rad = (((1 + (2*poly_right_cr[0]*y_eval*ym_per_pix + \
+            poly_right_cr[1])**2)**1.5) / np.absolute(2*poly_right_cr[0]))
+    #
+    #
+    ###########################################################################################
 
     return color_warp, line_search_img, left_fitx, right_fitx, left_curve_rad, right_curve_rad, dist_from_center
 
@@ -984,12 +998,7 @@ def get_polys_full(binary_warped, margin_l=100, margin_r=110, minpix=20, nwindow
     rightx = nonzerox[right_lane_inds]
     righty = nonzeroy[right_lane_inds] 
 
-    # Fit polynomials to the points identified. Note that these are in pixel dimensions
-    # and that next we will calculate the same but in meters
-    poly_left = np.polyfit(lefty, leftx, 2)
-    poly_right = np.polyfit(righty, rightx, 2)
-
-    return line_search_img, leftx, lefty, rightx, righty, poly_left, poly_right 
+    return line_search_img, leftx, lefty, rightx, righty
 
 
 def get_polys_margin(binary_warped, left_fit, right_fit, margin=100):
@@ -1022,11 +1031,7 @@ def get_polys_margin(binary_warped, left_fit, right_fit, margin=100):
     rightx = nonzerox[right_lane_inds]
     righty = nonzeroy[right_lane_inds]
 
-    # Fit a second order polynomial to each
-    poly_left = np.polyfit(lefty, leftx, 2)
-    poly_right = np.polyfit(righty, rightx, 2)
-
-    return leftx, lefty, rightx, righty, poly_left, poly_right
+    return leftx, lefty, rightx, righty
 
 
 if __name__ == '__main__':
