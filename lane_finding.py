@@ -6,6 +6,8 @@
  Author: Ciaran Murphy
  Date: 7th Nov 2017
 
+ This script is by no means optimized! It's super slow... given that it's just an educational tool really.
+
 """
 
 import os
@@ -27,10 +29,6 @@ INPUT_VIDEO = './project_video.mp4'
 OUTPUT_VIDEO = './project_video_out.mp4'
 DEBUG_DIR = './test_images'
 
-# Create an Exception class for handing failures in polyfit
-class PolyFitException(Exception): pass
-
-
 def parse_args():
     parser = ArgumentParser()
     parser.add_argument('-i', '--input', dest='pipeline_input', 
@@ -45,7 +43,8 @@ def parse_args():
             help="""Optional. If included and >-1, turn on debug output which will write all intermediary 
             images to ./output_images for every N frames.""")
     parser.add_argument('-s', '--stream', dest='stream', action='store_true',
-            help="""Optional. If included, constantly update an image called ./output.jpg with the current pipeline""")
+            help="""Optional. If included, constantly update an image called ./output.jpg 
+            with the current pipeline. You can then use eg `feh -R 0.2 output.jpg` to monitor progress.""")
     parser.add_argument('-0', '--t0', dest='start',
             help="""Optional. Clip an input video to start at t0 seconds.""")
     parser.add_argument('-1', '--t1', dest='end',
@@ -253,9 +252,6 @@ def pipeline(img, dest='./output_images', fname=None, cmap='BGR'):
 
     # If we got this far, then all is more or less ok. So save the result and return.
     pipeline.previous = final
-
-    # Draw a box around the image to make it clearer
-    final = cv2.rectangle(final, (0, 0), (final.shape[1]-1, final.shape[0]-1), (255, 255, 255))
 
     if __args.stream:
         # From the shell, use `feh -R 0.2 ./output.jpg` to watch the render in realtime
@@ -699,8 +695,71 @@ def find_lane_lines(binary_warped, orig):
         # that the rate of change of the left and right x (horizontal) values are not very different. 
         # In otherwords, take the derivative of the left and right x values with respect to y
         # and if they are very different, rescan the entire image instead of just the margins. If 
-        # the sanity check still fails after that, then reuse the last lane finding results. 
-        return False
+        # the sanity check still fails after that, then reuse the last lane finding results. The 
+        # color thresholding will work pretty well on it's own, even without this sanity check
+        #
+
+        # This function takes no args as all the data it needs are contained in the parent function
+        # (so no globals needed either)
+
+        # On the 1st image in the video there will be no history
+        if 'previous_dx_left' not in find_lane_lines.__dict__:
+            dx_left = np.mean( 2*poly_left[0]*ploty + poly_left[1] )
+            dx_right = np.mean( 2*poly_right[0]*ploty + poly_right[1] )
+            find_lane_lines.previous_dx_left = dx_left
+            find_lane_lines.previous_dx_right = dx_right
+            return 'LEFTRIGHT'
+            
+        # Configure some thresholds to test against. If any of these numbers are breached
+        # it will trigger a full image scan with fallback to using the previous image's data
+        left_tollerance_instantaneous = 0.8
+        left_tollerance_past = 1
+        right_tollerance_instantaneous = 0.8
+        right_tollerance_past = 1
+
+        # Calculate the rate of change of left and right lanes  (x wrt y)
+        dx_left = np.mean( 2*poly_left[0]*ploty + poly_left[1] )
+        dx_right = np.mean( 2*poly_right[0]*ploty + poly_right[1] )
+
+        # Now check if we breached any of the thresholds
+        ret = ''
+        # Instantaneous refers to the current rate of change
+        if dx_left > left_tollerance_instantaneous:
+            if __args.debug_mode > -1:
+                print('Instantaneous check failed for left lane on frame {};'.format(pipeline.counter), dx_left)
+            ret += 'LEFT'
+
+        elif dx_right > right_tollerance_instantaneous:
+            if __args.debug_mode > -1:
+                print('Instantaneous check failed for right lane on frame {};'.format(pipeline.counter), dx_right)
+            ret += 'RIGHT'
+        if ret != '': 
+            return ret
+
+        dx_left_last = find_lane_lines.previous_dx_left
+        dx_right_last = find_lane_lines.previous_dx_right
+
+        # Past refers to the comparison of the rate of change on this image vs the last one
+        if abs(dx_left - dx_left_last) > left_tollerance_past:
+            if __args.debug_mode > -1:
+                print('Past check failed for left lane on frame {};'.format(pipeline.counter), 
+                        abs(dx_left - dx_left_last), abs(dx_right - dx_right_last))
+            ret += 'LEFT'
+
+        elif abs(dx_right - dx_right_last) > right_tollerance_past:
+            if __args.debug_mode > -1:
+                print('Past check failed for right lane on frame {};'.format(pipeline.counter), 
+                        abs(dx_left - dx_left_last), abs(dx_right - dx_right_last))
+            ret += 'RIGHT'
+        if ret != '': 
+            return ret
+
+        # If we got this far, store the results for the next iteration
+        find_lane_lines.previous_dx_left = dx_left_last 
+        find_lane_lines.previous_dx_right = dx_right_last 
+
+        return 'PASS'
+
 
     def store_results():
         # Helper function to cache the most recent calculations
@@ -713,24 +772,57 @@ def find_lane_lines(binary_warped, orig):
         find_lane_lines.previous['poly_left'] = poly_left
         find_lane_lines.previous['poly_right'] = poly_right
 
-    # If we have past data, just scan around the margins of the new image for the lines
-    if 'previous' in find_lane_lines.__dict__:
+
+    # Setup a placeholder for ploty
+    ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0])
+
+    # If is the first image in the video, or the sanity check on the basic 
+    # parse fails, process the entire image
+    if 'previous' not in find_lane_lines.__dict__:
+        line_search_img, leftx, lefty, rightx, righty, \
+                poly_left, poly_right = get_polys_full(binary_warped)
+        store_results()
+
+    # If we have past data, just scan around the margins of the new image 
+    # for lane lines instead of processing the entire image. There doesn't seem
+    # to be much of a speedup in computation with this, but the stability of 
+    # the lane detection improves.
+    else:
         leftx, lefty, rightx, righty, poly_left, poly_right = get_polys_margin(
              binary_warped, 
              find_lane_lines.previous['poly_left'],
              find_lane_lines.previous['poly_right']
         )
         line_search_img = find_lane_lines.previous['line_search_img']
-        if sanity_check():
-            store_results()
 
-    # If is the first image in the video, or the sanity check on the basic 
-    # parse fails, process the entire image
-    if 'previous' not in find_lane_lines.__dict__ or not sanity_check():
-        line_search_img, leftx, lefty, rightx, righty, \
-                poly_left, poly_right = get_polys_full(binary_warped)
-        if sanity_check():
+        # Now run the sanity check and figure out what to do
+        if sanity_check() == 'PASS':
             store_results()
+        else:
+            line_search_img, leftx, lefty, rightx, righty, \
+                    poly_left, poly_right = get_polys_full(binary_warped)
+
+            check = sanity_check()
+            if check != 'PASS':
+                # Just take the lane lines from the last image
+                line_search_img = find_lane_lines.previous['line_search_img']
+                if check in ['LEFT', 'LEFTRIGHT']:
+                    if __args.debug_mode > -1:
+                        print('Using pervious left lines instead.')
+                    leftx = find_lane_lines.previous['leftx']
+                    lefty = find_lane_lines.previous['lefty']
+                    poly_left = find_lane_lines.previous['poly_left']
+                if check in ['RIGHT', 'LEFTRIGHT']:
+                    if __args.debug_mode > -1:
+                        print('Using pervious right lines instead.')
+                    rightx = find_lane_lines.previous['rightx']
+                    righty = find_lane_lines.previous['righty']
+                    poly_right = find_lane_lines.previous['poly_right']
+            else:
+                if __args.debug_mode > -1:
+                    print('Full scan worked!')
+                store_results()
+
 
     # Find the radius of curvature in real world dimensions. We are using
     # a hard coded dimension conversion here for simplicity (`ym_per_pix` and
@@ -764,9 +856,30 @@ def find_lane_lines(binary_warped, orig):
             poly_right_cr[1])**2)**1.5) / np.absolute(2*poly_right_cr[0]))
 
     # Add lines to the output image showing the lanes
-    ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0])
     left_fitx = poly_left[0]*ploty**2 + poly_left[1]*ploty + poly_left[2]
     right_fitx = poly_right[0]*ploty**2 + poly_right[1]*ploty + poly_right[2]
+
+    # Manage a history of values to average over
+    history_length = 100
+
+    # Pop off the earliest stored example if there's one there and append this one
+    if 'left_fit_hist' in pipeline.__dict__:
+        if len(pipeline.left_fit_history) == history_length:
+            pipeline.left_fit_history.pop(0)
+            pipeline.right_fit_history.pop(0)
+    else:
+        pipeline.left_fit_history = []
+        pipeline.right_fit_history = []
+
+    pipeline.left_fit_history.append(left_fitx)
+    pipeline.right_fit_history.append(right_fitx)
+
+    # Take the mean and return that instead of just what we got from the current image
+    left_fitx = np.mean(pipeline.left_fit_history, axis=0)
+    right_fitx = np.mean(pipeline.right_fit_history, axis=0)
+
+    lefty = lefty[:leftx.shape[0]]
+    righty = righty[:rightx.shape[0]]
 
     # Create an image to draw the lines on
     warp_zero = np.zeros_like(binary_warped).astype(np.uint8)
@@ -783,13 +896,14 @@ def find_lane_lines(binary_warped, orig):
     return color_warp, line_search_img, left_fitx, right_fitx, left_curve_rad, right_curve_rad, dist_from_center
 
 
-def get_polys_full(binary_warped, margin=120, minpix=20, nwindows=9):
+def get_polys_full(binary_warped, margin_l=100, margin_r=110, minpix=20, nwindows=9):
     """Scan the input image using a sliding window approach to find left and right
     lane pixel positions.
 
     Args:
         binary_warped: birdseye view of the road
-        margin: the margin in pixels to seach to left and right
+        margin_l: the margin in pixels to seach around for the left lane
+        margin_r: the margin in pixels to seach around for the right lane
         minpix: minimum number of pixels to detect for each window
         nwindows: number of sliding windows to use
 
@@ -833,11 +947,11 @@ def get_polys_full(binary_warped, margin=120, minpix=20, nwindows=9):
         win_y_low = binary_warped.shape[0] - (window+1)*window_height
         win_y_high = binary_warped.shape[0] - window*window_height
 
-        win_xleft_low = leftx_current - margin
-        win_xleft_high = leftx_current + margin
+        win_xleft_low = leftx_current - margin_l
+        win_xleft_high = leftx_current + margin_l
 
-        win_xright_low = rightx_current - margin
-        win_xright_high = rightx_current + margin
+        win_xright_low = rightx_current - margin_r
+        win_xright_high = rightx_current + margin_r
 
         cv2.rectangle(line_search_img, (win_xleft_low, win_y_low), (win_xleft_high, win_y_high), (0,255,0), 2) 
         cv2.rectangle(line_search_img, (win_xright_low, win_y_low), (win_xright_high, win_y_high), (0,255,0), 2) 
@@ -887,7 +1001,7 @@ def get_polys_margin(binary_warped, left_fit, right_fit, margin=100):
         right_fit: the pre-existing right fit
         margin: margin to search within
     Returns:
-        tuple containing left and right x & y pixels, left polynomial, right polynomial
+        tuple containing an image of the search, left and right x & y pixels, left polynomial, right polynomial
 
     """
     nonzero = binary_warped.nonzero()
@@ -895,14 +1009,14 @@ def get_polys_margin(binary_warped, left_fit, right_fit, margin=100):
     nonzerox = np.array(nonzero[1])
 
     left_lane_inds = ((nonzerox > (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + 
-    left_fit[2] - margin)) & (nonzerox < (left_fit[0]*(nonzeroy**2) + 
-    left_fit[1]*nonzeroy + left_fit[2] + margin))) 
+        left_fit[2] - margin)) & (nonzerox < (left_fit[0]*(nonzeroy**2) + 
+        left_fit[1]*nonzeroy + left_fit[2] + margin))) 
 
     right_lane_inds = ((nonzerox > (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + 
-    right_fit[2] - margin)) & (nonzerox < (right_fit[0]*(nonzeroy**2) + 
-    right_fit[1]*nonzeroy + right_fit[2] + margin)))  
+        right_fit[2] - margin)) & (nonzerox < (right_fit[0]*(nonzeroy**2) + 
+        right_fit[1]*nonzeroy + right_fit[2] + margin)))  
 
-    # Again, extract left and right line pixel positions
+    # Extract left and right line pixel positions
     leftx = nonzerox[left_lane_inds]
     lefty = nonzeroy[left_lane_inds] 
     rightx = nonzerox[right_lane_inds]
@@ -911,11 +1025,6 @@ def get_polys_margin(binary_warped, left_fit, right_fit, margin=100):
     # Fit a second order polynomial to each
     poly_left = np.polyfit(lefty, leftx, 2)
     poly_right = np.polyfit(righty, rightx, 2)
-
-    # Generate x and y values for plotting
-    ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0] )
-    left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
-    right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
 
     return leftx, lefty, rightx, righty, poly_left, poly_right
 
