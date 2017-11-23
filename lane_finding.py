@@ -42,10 +42,14 @@ def parse_args():
             here and images will be created in that directory for each stage of the pipeline. 
             Defaults to `OUTPUT_VIDEO` as configured inside this script.""")
     parser.add_argument('-d', '--debug', dest='debug_mode',
-            help="""If included and >-1, turn on debug output which will write all intermediary 
+            help="""Optional. If included and >-1, turn on debug output which will write all intermediary 
             images to ./output_images for every N frames.""")
-    parser.add_argument('-s', '--stream', dest='stream',
-            help="""If included, constantly update an image called ./output.jpg with the current pipeline""")
+    parser.add_argument('-s', '--stream', dest='stream', action='store_true',
+            help="""Optional. If included, constantly update an image called ./output.jpg with the current pipeline""")
+    parser.add_argument('-0', '--t0', dest='start',
+            help="""Optional. Clip an input video to start at t0 seconds.""")
+    parser.add_argument('-1', '--t1', dest='end',
+            help="""Optional. Clip an input video to end at t1 seconds.""")
 
     args = parser.parse_args()
 
@@ -75,6 +79,12 @@ def main():
 
     if input_data.split('.')[-1] == 'mp4':
         vin = VideoFileClip(input_data)
+
+        if __args.start is not None:
+            vin = vin.set_start(float(__args.start))
+        if __args.end is not None:
+            vin = vin.set_end(float(__args.end))
+
         vout = vin.fl_image(pipeline)
         vout.write_videofile(output_dest, audio=False)
 
@@ -131,7 +141,7 @@ def pipeline(img, dest='./output_images', fname=None, cmap='BGR'):
         pipeline.counter += 1
 
     if __args.debug_mode > 0 and fname is None:
-        fname = 'frame_' + str(pipeline.counter) + '.jpg'
+        fname = 'frame_{:05}.jpg'.format(pipeline.counter, '.jpg')
 
     # Create helper lambdas for easily adding text to images later on
     # Params: [img, txt, (pos_x, pos_y), font_scale, color_rgb, line_type]
@@ -144,26 +154,29 @@ def pipeline(img, dest='./output_images', fname=None, cmap='BGR'):
     undist = undistort(img)
 
     # Step (3): thresholding to produce a binary image
-    color_s = color_threshold(undist, tscheme='HLS', channel='S', thresh=(180, 255))
-    color_l = color_threshold(undist, tscheme='HLS', channel='L', thresh=(105, 255))
     color_r = color_threshold(undist, tscheme='RGB', channel='R', thresh=(220, 255))
     color_g = color_threshold(undist, tscheme='RGB', channel='G', thresh=(200, 255))
+    color_h = color_threshold(undist, tscheme='HSV', channel='H', thresh=(20, 100))
+    color_v = color_threshold(undist, tscheme='HSV', channel='V', thresh=(210, 256))
     sobel   = sobel_threshold(undist, orient='x', ksize=3, thresh=(20, 100))
+
     direct  = dir_threshold(undist, ksize=3, thresh=(0.7, 1.3))
     mag     = mag_threshold(undist, ksize=3, thresh=(20, 100))
 
     # The L channel in HLS picks up distant lane lines, in particular when the road
     # surface is different in the foreground than the background. However it also
     # picks up a lot of noise in the foreground. This noise can be removed using a 2D
-    # convolution.
-    kernel = np.array([[-1, -1, -1], [-1, 5, -1], [-1, -1, -1]])
-    color_l_conv = cv2.filter2D(color_l, -1, kernel)
-    color_l_conv[color_l_conv > 0] = 1
-    #color_l_conv = (color_l_conv & (color_r | color_g | sobel))
+    # convolution with the code below, but in the end I removed HLS color space altogether
+    # in favor of HSV instead. I leave the code below for reference though.
+    #kernel = np.array([[-1, -1, -1], [-1, 5, -1], [-1, -1, -1]])
+    #color_l_conv = cv2.filter2D(color_l, -1, kernel)
+    #color_l_conv[color_l_conv > 0] = 1
 
     # Combine all images
-    #combined = (color_l & direct) & (((color_r & color_g & color_s) | ((color_s | sobel) & color_l)) | color_l_conv)
-    combined = (color_r | color_g | color_l_conv | color_s) & (sobel | direct)
+    right = (sobel | color_g | color_v) ^ color_h 
+    left = ((color_h | sobel | color_r) & mag) ^ right
+    combined = left | right
+    #combined = (color_r | color_g | color_h | color_v) | sobel | (direct & mag)
 
     # Step (4): perspective transform
     binary_warped = warp(combined)
@@ -171,70 +184,22 @@ def pipeline(img, dest='./output_images', fname=None, cmap='BGR'):
     # Steps (5) and (6): detect lane lines and determine curvature
     # Incase of exceptions being raised while generating the poly lines, store some 
     # debug help to disk for offline analysis. 
-    try:
-        color_warp, line_search_img, poly_left, poly_right, left_curve_rad, right_curve_rad, center = \
-                find_lane_lines(binary_warped, img)
-
-    except PolyFitException as e:
-        print('ERROR!! Failed to get polys. Debug image files: {}*.jpg'.format(pipeline.counter))
-        dbg_name = DEBUG_DIR + str(pipeline.counter) + '_orig.jpg'
-        cv2.imwrite(dbg_fname, cv2.cvtColor(orig, cv2.COLOR_BGR2RGB))
-
-        dbg_name = DEBUG_DIR + str(pipeline.counter) + '_warped.jpg'
-        cv2.imwrite(dbg_fname, cv2.cvtColor(binary_warped, cv2.COLOR_GRAY2RGB))
-        pipeline.counter += 1
-
-        # Instead of crashing the video generation now, return the previous successful image. This
-        # is not ideal, but better to continue with the pipeline and find more issues if they are there.
-        return pipeline.previous
+    color_warp, line_search_img, poly_left, poly_right, left_curve_rad, right_curve_rad, center = \
+            find_lane_lines(binary_warped, img)
 
     # Step (7) and (8): warp the detected lane lines back onto the original image and visualize the results
     # Unwarp and combine the result with the original image
     unwarped = warp(color_warp, inverse=True)
     unwarped_withlines = cv2.addWeighted(undist, 1, unwarped, 0.3, 0)
 
-    # Add the descriptddive text to the main result image
-    txt = 'Left Curvature: {}m | Right Curvature: {}m'.format(int(left_curve_rad), int(right_curve_rad))
-    params = (unwarped_withlines, txt, (25, 50), 1, (255, 255, 255), 2)
-    unwarped_withlines = add_text(params)
-
-    txt = 'Distande from Center: {:0.4}m'.format(center)
-    params = (unwarped_withlines, txt, (25, 90), 1, (255, 255, 255), 2)
-    unwarped_withlines = add_text(params)
-
-    # Now create a composite image that shows all the main stages of the pipeline. Each
-    # time this pipeline is called a new image will be returned and when run through moviepy
-    # an output video will be created that shows all content.
-    top = np.concatenate(
-             (add_text_defaults(cv2.cvtColor(binary_warped*255, cv2.COLOR_GRAY2BGR), 'Bird'),
-             add_text_defaults(line_search_img, 'Lane Search'),
-             add_text_defaults(color_warp, 'Lane'),
-             add_text_defaults(cv2.cvtColor(color_l*255, cv2.COLOR_GRAY2BGR), 'L'),
-             add_text_defaults(cv2.cvtColor(color_l_conv*255, cv2.COLOR_GRAY2BGR), 'L_conv'),
-             add_text_defaults(cv2.cvtColor(mag*255, cv2.COLOR_GRAY2BGR), 'Mag')), axis=1)
-    top = imresize(top, (undist.shape[0]//4, undist.shape[1]))
-
-    bottom = np.concatenate(
-            (add_text_defaults(cv2.cvtColor(color_r*255, cv2.COLOR_GRAY2BGR), 'R'), 
-             add_text_defaults(cv2.cvtColor(color_g*255, cv2.COLOR_GRAY2BGR), 'G'),
-             add_text_defaults(cv2.cvtColor(color_s*255, cv2.COLOR_GRAY2BGR), 'S'), 
-             add_text_defaults(cv2.cvtColor(sobel*255, cv2.COLOR_GRAY2BGR), 'Sobel'),
-             add_text_defaults(cv2.cvtColor(direct*255, cv2.COLOR_GRAY2BGR), 'Dir'),
-             add_text_defaults(cv2.cvtColor(combined*255, cv2.COLOR_GRAY2BGR), 'Combined')), axis=1)
-    bottom = imresize(bottom, (undist.shape[0]//4, undist.shape[1]))
-
-    final = np.concatenate((top, unwarped_withlines, bottom), axis=0)
-
     # If snapshot is enabled, then dump all images to disk for manual inspection later on
     if __args.debug_mode > 0 and pipeline.counter % __args.debug_mode == 0:
         i = 1
         fname = fname.split('.')[0]
         _undist_rgb = cv2.cvtColor(undist, cv2.COLOR_BGR2RGB)
-        _final_rgb = cv2.cvtColor(final, cv2.COLOR_BGR2RGB)
         cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'undistorted.jpg')), _undist_rgb); i+=1 
-        cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'color_s.jpg')), color_s*255); i+=1
-        cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'color_l.jpg')), color_l*255); i+=1
-        cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'color_l_conv.jpg')), color_l_conv*255); i+=1
+        cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'color_h.jpg')), color_h*255); i+=1
+        cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'color_v.jpg')), color_v*255); i+=1
         cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'color_r.jpg')), color_r*255); i+=1
         cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'color_g.jpg')), color_g*255); i+=1
         cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'sobel.jpg')), sobel*255); i+=1
@@ -245,6 +210,45 @@ def pipeline(img, dest='./output_images', fname=None, cmap='BGR'):
         cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'rectangles.jpg')), line_search_img); i+=1
         cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'lane.jpg')), color_warp); i+=1
         cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'withlines.jpg')), unwarped_withlines); i+=1
+
+    # Add the descriptddive text to the main result image
+    txt = 'Left Curvature: {:4}m | Right Curvature: {:4}m'.format(int(left_curve_rad), int(right_curve_rad))
+    params = (unwarped_withlines, txt, (25, 50), 1, (255, 255, 255), 2)
+    unwarped_withlines = add_text(params)
+
+    txt = 'Distande from Center: {:0.2f}m'.format(center)
+    params = (unwarped_withlines, txt, (25, 90), 1, (255, 255, 255), 2)
+    unwarped_withlines = add_text(params)
+
+    # Now create a composite image that shows all the main stages of the pipeline. Each
+    # time this pipeline is called a new image will be returned and when run through moviepy
+    # an output video will be created that shows all content.
+    top = np.concatenate(
+             (
+                 add_text_defaults(cv2.cvtColor(color_r*255, cv2.COLOR_GRAY2BGR), 'R'), 
+                 add_text_defaults(cv2.cvtColor(color_g*255, cv2.COLOR_GRAY2BGR), 'G'),
+                 add_text_defaults(cv2.cvtColor(color_h*255, cv2.COLOR_GRAY2BGR), 'H'),
+                 add_text_defaults(cv2.cvtColor(color_v*255, cv2.COLOR_GRAY2BGR), 'V'),
+                 add_text_defaults(cv2.cvtColor(sobel*255, cv2.COLOR_GRAY2BGR), 'Sobel'),
+                 add_text_defaults(cv2.cvtColor(direct*255, cv2.COLOR_GRAY2BGR), 'Dir'),
+             ), axis=1)
+    top = imresize(top, (undist.shape[0]//4, undist.shape[1]))
+
+    bottom = np.concatenate(
+            (
+                 add_text_defaults(cv2.cvtColor(left*255, cv2.COLOR_GRAY2BGR), 'Left'),
+                 add_text_defaults(cv2.cvtColor(right*255, cv2.COLOR_GRAY2BGR), 'Right'),
+                 add_text_defaults(cv2.cvtColor(combined*255, cv2.COLOR_GRAY2BGR), 'Combined'),
+                 add_text_defaults(cv2.cvtColor(binary_warped*255, cv2.COLOR_GRAY2BGR), 'Bird'),
+                 add_text_defaults(line_search_img, 'Search'),
+                 add_text_defaults(color_warp, 'Lane'),
+             ), axis=1)
+    bottom = imresize(bottom, (undist.shape[0]//4, undist.shape[1]))
+
+    final = np.concatenate((top, unwarped_withlines, bottom), axis=0)
+
+    if __args.debug_mode > 0 and pipeline.counter % __args.debug_mode == 0:
+        _final_rgb = cv2.cvtColor(final, cv2.COLOR_BGR2RGB)
         cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'final.jpg')), _final_rgb); i+=1
 
     # If we got this far, then all is more or less ok. So save the result and return.
@@ -418,21 +422,16 @@ def undistort(img, cmap='BGR'):
     return cv2.undistort(img, *undistort.cal_data)
 
 
-def color_threshold(img, tscheme='HLS', cmap='BGR', channel='S', thresh=None):
+def color_threshold(img, tscheme='HSV', cmap='BGR', channel='S', thresh=None):
     """Convert an image to `tscheme`, then to gray, and then filter out pixels that fall within `thresh` range.
 
     Args:
         img: the original image
-        tscheme: the target color scheme to use for the thresholding, can be either 'HLS' or 'RGB'
+        tscheme: the target color scheme to use for the thresholding, can be either 'HSV' or 'RGB'
         cmap: the input color map, can be either 'RGB' or 'BGR'
-        channel: which channel to apply the threshold to - can be either 'H', 'L', 'S', 'R', 'G', or 'B'.
+        channel: which channel to apply the threshold to - can be either 'H', 'S', 'V', 'R', 'G', or 'B'.
         thresh: 2-tuple specifying the min and max values. Pixels outside this range 
             will be black in the output. Pixels inside the range (inclusive) will be white.
-            Suggested threshold values:
-                o HLS scheme, S channel: `thresh=(180, 255)`
-                o BGR scheme, R channel: `thresh=(220, 255)`
-                o BGR scheme, G channel: `thresh=(190, 255)`
-            My experiements found that these three were the most useful.
 
     Returns:
         binary: a binary image with pixels within the thresholds white, all others black.
@@ -440,29 +439,29 @@ def color_threshold(img, tscheme='HLS', cmap='BGR', channel='S', thresh=None):
     """
     assert thresh is not None, "Must specify a threshold. See this function's help."
     assert cmap in ['BGR', 'RGB'], 'Invalid input color map, choose either BGR or RGB.'
-    assert tscheme in ['HLS', 'RGB'], 'Invalid target color scheme, choose either HLS or RGB.'
-    assert channel in ['R', 'G', 'B', 'H', 'L', 'S'], 'Invalid target channel for color map.'
+    assert tscheme in ['HSV', 'RGB'], 'Invalid target color scheme, choose either HSV or RGB.'
+    assert channel in ['R', 'G', 'B', 'H', 'S', 'V'], 'Invalid target channel for color map.'
 
     if cmap == 'BGR':
-        if tscheme == 'HLS':
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)
+        if tscheme == 'HSV':
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         elif tscheme == 'RGB':
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     elif cmap == 'RGB':
-        if tscheme == 'HLS':
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2HLS)
+        if tscheme == 'HSV':
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
 
-    if tscheme == 'HLS':
+    if tscheme == 'HSV':
         ch1 = img[:,:,0] # Hue channel
-        ch2 = img[:,:,1] # Lightness channel
-        ch3 = img[:,:,2] # Saturation channel
+        ch2 = img[:,:,1] # Saturation channel
+        ch3 = img[:,:,2] # Value channel
 
     else:
         ch1 = img[:,:,0] # Red channel
         ch2 = img[:,:,1] # Green channel
         ch3 = img[:,:,2] # Blue channel
 
-    channel_select = {'H': ch1, 'L': ch2, 'S': ch3, 
+    channel_select = {'H': ch1, 'S': ch2, 'V': ch3, 
                       'R': ch1, 'G': ch2, 'B': ch3}
 
     binary = np.zeros_like(ch3)
@@ -693,34 +692,15 @@ def find_lane_lines(binary_warped, orig):
     def sanity_check():
         #
         # Sanity checks on the polynomials
-        #
-#       max_curve_diff_left = 40000000
-#       max_curve_diff_right = 25000000
-#       shift_left, shift_right = False, False
-
-#       if 'previous_left' not in find_lane_lines.__dict__:
-#           # Take care of the 1st call to this function, where there is no history
-#           find_lane_lines.previous_left = poly_left, left_curve_rad
-#           find_lane_lines.previous_right = poly_right, right_curve_rad
-
-#       else:
-#           if abs(left_curve_rad - find_lane_lines.previous_left[1]) > max_curve_diff_left:
-#               # Left lane curvature change was outside permitted max
-#               poly_left, left_curve_rad = find_lane_lines.previous_left
-#               find_lane_lines.previous_left = poly_right, right_curve_rad
-#               shift_left = True
-#           else:
-#               find_lane_lines.previous_left = poly_left, left_curve_rad
-
-#           if abs(right_curve_rad - find_lane_lines.previous_right[1]) > max_curve_diff_right:
-#               # Right lane curvature change was outside permitted max
-#               poly_right, right_curve_rad = find_lane_lines.previous_right
-#               find_lane_lines.previous_right = poly_left, left_curve_rad
-#               shift_right = True
-#           else:
-#               find_lane_lines.previous_right = poly_right, right_curve_rad
-
-        return True
+        # 
+        # I tried to do things like check for sudden changes in curvature relative to the last
+        # image, or big differences in left and right curvature. But the best thing seems to be to
+        # try as hard as possible to get clean images through the system, and then only check the
+        # that the rate of change of the left and right x (horizontal) values are not very different. 
+        # In otherwords, take the derivative of the left and right x values with respect to y
+        # and if they are very different, rescan the entire image instead of just the margins. If 
+        # the sanity check still fails after that, then reuse the last lane finding results. 
+        return False
 
     def store_results():
         # Helper function to cache the most recent calculations
@@ -762,7 +742,7 @@ def find_lane_lines(binary_warped, orig):
     # on US regulations for lane sizes & road markings, and assume that all images are of flat 
     # terrain (not necessarily the case, but good enough for this project).
     ym_per_pix = 30/720  # meters per pixel in y dimension
-    xm_per_pix = 3.7/700 # meters per pixel in x dimension
+    xm_per_pix = 3.7/750 # meters per pixel in x dimension
 
     # Now we can get the distance from center in meters
     true_center = binary_warped.shape[1] / 2
@@ -777,25 +757,16 @@ def find_lane_lines(binary_warped, orig):
     # Calculate the new radii of curvature
     y_eval = np.max(lefty)
 
-    # Calcukate radius of curvature in meters
-    left_curve_rad = ((1 + (2*poly_left_cr[0]*y_eval*ym_per_pix + \
-            poly_left_cr[1])**2)**1.5) / np.absolute(2*poly_left_cr[0])
-
-    right_curve_rad = ((1 + (2*poly_right_cr[0]*y_eval*ym_per_pix + \
-            poly_right_cr[1])**2)**1.5) / np.absolute(2*poly_right_cr[0])
-
+    # Calculate radius of curvature in meters
+    left_curve_rad = (((1 + (2*poly_left_cr[0]*y_eval*ym_per_pix + \
+            poly_left_cr[1])**2)**1.5) / np.absolute(2*poly_left_cr[0]))
+    right_curve_rad = (((1 + (2*poly_right_cr[0]*y_eval*ym_per_pix + \
+            poly_right_cr[1])**2)**1.5) / np.absolute(2*poly_right_cr[0]))
 
     # Add lines to the output image showing the lanes
     ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0])
     left_fitx = poly_left[0]*ploty**2 + poly_left[1]*ploty + poly_left[2]
     right_fitx = poly_right[0]*ploty**2 + poly_right[1]*ploty + poly_right[2]
-
-    #if shift_left:
-    #    left_fitx = poly_right[0]*ploty**2 + poly_right[1]*ploty + poly_right[2] - lane_width
-
-    #if shift_right:
-    #    right_fitx = poly_right[0]*ploty**2 + poly_right[1]*ploty + poly_right[2] + lane_width
-
 
     # Create an image to draw the lines on
     warp_zero = np.zeros_like(binary_warped).astype(np.uint8)
@@ -812,7 +783,7 @@ def find_lane_lines(binary_warped, orig):
     return color_warp, line_search_img, left_fitx, right_fitx, left_curve_rad, right_curve_rad, dist_from_center
 
 
-def get_polys_full(binary_warped, margin=100, minpix=50, nwindows=9):
+def get_polys_full(binary_warped, margin=120, minpix=20, nwindows=9):
     """Scan the input image using a sliding window approach to find left and right
     lane pixel positions.
 
