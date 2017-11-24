@@ -157,8 +157,8 @@ def pipeline(img, dest='./output_images', fname=None, cmap='BGR'):
     color_g = color_threshold(undist, tscheme='RGB', channel='G', thresh=(200, 255))
     color_h = color_threshold(undist, tscheme='HSV', channel='H', thresh=(20, 100))
     color_v = color_threshold(undist, tscheme='HSV', channel='V', thresh=(210, 256))
-    sobel   = sobel_threshold(undist, orient='x', ksize=3, thresh=(20, 100))
 
+    sobel   = sobel_threshold(undist, orient='x', ksize=3, thresh=(20, 100))
     direct  = dir_threshold(undist, ksize=3, thresh=(0.7, 1.3))
     mag     = mag_threshold(undist, ksize=3, thresh=(20, 100))
 
@@ -166,7 +166,7 @@ def pipeline(img, dest='./output_images', fname=None, cmap='BGR'):
     # surface is different in the foreground than the background. However it also
     # picks up a lot of noise in the foreground. This noise can be removed using a 2D
     # convolution with the code below, but in the end I removed HLS color space altogether
-    # in favor of HSV instead. I leave the code below for reference though.
+    # in favor of HSV instead. I leave the code below for reference.
     #kernel = np.array([[-1, -1, -1], [-1, 5, -1], [-1, -1, -1]])
     #color_l_conv = cv2.filter2D(color_l, -1, kernel)
     #color_l_conv[color_l_conv > 0] = 1
@@ -175,7 +175,6 @@ def pipeline(img, dest='./output_images', fname=None, cmap='BGR'):
     right = (sobel | color_g | color_v) ^ color_h 
     left = ((color_h | sobel | color_r) & mag) ^ right
     combined = left | right
-    #combined = (color_r | color_g | color_h | color_v) | sobel | (direct & mag)
 
     # Step (4): perspective transform
     binary_warped = warp(combined)
@@ -195,8 +194,7 @@ def pipeline(img, dest='./output_images', fname=None, cmap='BGR'):
     if __args.debug_mode > 0 and pipeline.counter % __args.debug_mode == 0:
         i = 1
         fname = fname.split('.')[0]
-        _undist_rgb = cv2.cvtColor(undist, cv2.COLOR_BGR2RGB)
-        cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'undistorted.jpg')), _undist_rgb); i+=1 
+        cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'undistorted.jpg')), undist); i+=1 
         cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'color_h.jpg')), color_h*255); i+=1
         cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'color_v.jpg')), color_v*255); i+=1
         cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'color_r.jpg')), color_r*255); i+=1
@@ -247,8 +245,7 @@ def pipeline(img, dest='./output_images', fname=None, cmap='BGR'):
     final = np.concatenate((top, unwarped_withlines, bottom), axis=0)
 
     if __args.debug_mode > 0 and pipeline.counter % __args.debug_mode == 0:
-        _final_rgb = cv2.cvtColor(final, cv2.COLOR_BGR2RGB)
-        cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'final.jpg')), _final_rgb); i+=1
+        cv2.imwrite(os.sep.join((dest, fname + '-' + str(i) + '-' + 'final.jpg')), final); i+=1
 
     # If we got this far, then all is more or less ok. So save the result and return.
     pipeline.previous = final
@@ -867,22 +864,35 @@ def find_lane_lines(binary_warped, orig):
     # Draw the lane onto the warped blank image
     cv2.fillPoly(color_warp, np.int_([pts]), (0, 255, 0))
 
-    ###########################################################################################
-    #
-    # Calculate real world measurements
-    #
-    #
-    # Find the radius of curvature in real world dimensions. We are using a hard
-    # coded dimension conversion here for simplicity (`ym_per_pix` and `xm_per_pix`)
-    # but in a real system it would be necessary to use some kind of markers in the
-    # image that are of known dimensions. This is needed for example to handle cases
-    # where the road is ascending or descending a hill.
-    # 
+    left_curve_rad, right_curve_rad, dist_from_center =  \
+        get_real_world_measurements(binary_warped, leftx, lefty, rightx, righty)
+
+    return color_warp, line_search_img, left_fitx, right_fitx, left_curve_rad, right_curve_rad, dist_from_center
+
+
+def get_real_world_measurements(binary_warped, leftx, lefty, rightx, righty):
+    """Calculate real world measurements from pixel positions.
+    
+    Find the radius of curvature in real world dimensions. We are using a hard
+    coded dimension conversion here for simplicity (`ym_per_pix` and `xm_per_pix`)
+    but in a real system it would be necessary to use some kind of markers in the
+    image that are of known dimensions. This is needed for example to handle cases
+    where the road is ascending or descending a hill.
+
+    Args:
+        binary_warped:  the binary, warped version of the current image
+        leftx, lefty: points for left x and y
+        rightx, righty: points for right x and y
+
+    Returns:
+        real world measurements in meters for curvature and distance of the car from lane center
+     
+    """
     # Define conversions in x and y from pixels space to meters. These are assumed
     # values based on US regulations for lane sizes & road markings, and assume that
     # all images are of flat terrain (not necessarily the case, but good enough for
     # this project).
-    #
+    
     ym_per_pix = 30/720  # meters per pixel in y dimension
     xm_per_pix = 3.7/750 # meters per pixel in x dimension
 
@@ -903,11 +913,9 @@ def find_lane_lines(binary_warped, orig):
             poly_left_cr[1])**2)**1.5) / np.absolute(2*poly_left_cr[0]))
     right_curve_rad = (((1 + (2*poly_right_cr[0]*y_eval*ym_per_pix + \
             poly_right_cr[1])**2)**1.5) / np.absolute(2*poly_right_cr[0]))
-    #
-    #
-    ###########################################################################################
 
-    return color_warp, line_search_img, left_fitx, right_fitx, left_curve_rad, right_curve_rad, dist_from_center
+    return left_curve_rad, right_curve_rad, dist_from_center
+
 
 
 def get_polys_full(binary_warped, margin_l=100, margin_r=110, minpix=20, nwindows=9):
