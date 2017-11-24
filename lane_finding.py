@@ -777,7 +777,7 @@ def find_lane_lines(binary_warped, orig):
     def get_avg_polys():
         # Get two polynomials taking into account the history of pevious images
 
-        history_length = 10
+        history_length = 5
 
         # Remove the earliest stored sample if needed and append this new one instead
         if 'poly_left' in pipeline.__dict__:
@@ -836,13 +836,13 @@ def find_lane_lines(binary_warped, orig):
                 line_search_img = find_lane_lines.previous['line_search_img']
                 if check in ['LEFT', 'LEFTRIGHT']:
                     if __args.debug_mode > -1:
-                        print('Using pervious left lines instead.')
+                        print('Using previous left lines instead.')
                     leftx = find_lane_lines.previous['leftx']
                     lefty = find_lane_lines.previous['lefty']
                     poly_left = find_lane_lines.previous['poly_left']
                 if check in ['RIGHT', 'LEFTRIGHT']:
                     if __args.debug_mode > -1:
-                        print('Using pervious right lines instead.')
+                        print('Using previous right lines instead.')
                     rightx = find_lane_lines.previous['rightx']
                     righty = find_lane_lines.previous['righty']
                     poly_right = find_lane_lines.previous['poly_right']
