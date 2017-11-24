@@ -71,7 +71,7 @@ for these distortion types so that the image is as representative of the real
 world as possible. The code snippet below is taken from the `undistort(img)`
 method implemented for this project and uses opencv's `cv2.calibrateCamera()`
 method to undistort the image. The code is implemented in the file
-`lane_finding.py`, lines 351 to 418. Below is the method signature for
+`lane_finding.py`. Below is the method signature for
 reference. 
 
 ```python
@@ -176,7 +176,7 @@ follows:
   * Directional filter (not used in the end)
   * Magnitudinal filter
 
-The below code snippet from `lane_finding,py` shows the steps (lines 153 to 181).
+The below code snippet from `lane_finding,py` shows the steps.
 
 ```python
     # Steps (1) and (2): calibration (happens automatically) and distortion correction
@@ -276,23 +276,27 @@ __f(y)__ and not __f(x)__ since the lane lines are close to vertical, not
 horizontal, therefore we want to scale __y__ with respect to __y__, and not
 __x__ with respect to __y__.
 
-To fit a polynomial to a set of points, I used a sliding window approach to 1st
-detect the position of the points in the warped image. I then took a histogram
-of the bottom half of the image. The max points on this histogram provide the
-horizontal position of each of the lane lines and gives a place to start.
+To find the points matching the start of the lane lines, I took a histogram of
+the sum of pixel values for the bottom half of the image. The max points on
+this histogram provide the horizontal position at the bottom of the image for
+each of the lane lines. This gives a place to start from to discover the rest
+of the relevant pixels.
 
 ![hist of pixels](./resources/show_hist_birds.png "Histogram of Pixels")
 
 I then used a sliding window approach to finding the specific areas though the
 image where the lane pixels move through. The process is illustrated in the
 following image where I start at the bottom and work upwards searching for
-areas that contain pixels. The code for this is implemented in lines 957
-through 988 of the function `get_polys_full()` in `lane_finding.py`.
+areas that contain pixels. The code for this is implemented in the function
+`get_polys_full()` in `lane_finding.py`.
+
+![sliding window](./resources/sliding_window.jpg "Sliding Window")
 
 Once we have the initial positions of the lanes, it is not needed to re-run
 a full scan of all subsequent images. In fact it's enough to only scan a margin
-around the new images. This doesn't seem to speed up the running of the script.
-For implementation, see lines 1003 onwards in `get_polys_margin()`.
+around the new images. This doesn't seem to speed up the running of the script
+but does significantly stabalize the polinomial fitting proceedure.  For
+implementation, see `get_polys_margin()`.
 
 ```python
 def get_polys_margin(binary_warped, left_fit, right_fit, margin=100):
