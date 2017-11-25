@@ -394,7 +394,7 @@ def get_real_world_measurements(binary_warped, leftx, lefty, rightx, righty):
 Here is an example of the detected lane being projected back onto an original
 image. 
 
-[![projected](./resources/projected.jpg "Projected Lane")](https://www.youtube.com/watch?v=4N3Hpsl2VB4)
+[![projected](./resources/projected.jpg "Projected Lane")](https://youtu.be/F5Duo2Uap1M)
 
 ---
 
@@ -404,7 +404,7 @@ Finally, here is a link to the processed project video.
 
 * [local copy](./project_video_out.mp4)
 
-* [youtube](https://www.youtube.com/watch?v=4N3Hpsl2VB4)
+* [youtube](https://youtu.be/F5Duo2Uap1M)
 
 ---
 
