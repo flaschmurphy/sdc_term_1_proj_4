@@ -6,7 +6,8 @@
  Author: Ciaran Murphy
  Date: 7th Nov 2017
 
- This script is by no means optimized! It's super slow... given that it's just an educational tool really.
+ This script is by no means optimized! It's super slow... which 
+ is ok given that it's just an educational tool.
 
 """
 
@@ -213,7 +214,7 @@ def pipeline(img, dest='./output_images', fname=None, cmap='BGR'):
     params = (unwarped_withlines, txt, (25, 50), 1, (255, 255, 255), 2)
     unwarped_withlines = add_text(params)
 
-    txt = 'Distande from Center: {:0.2f}m'.format(center)
+    txt = 'Distance from Center: {:+.2f}m'.format(center)
     params = (unwarped_withlines, txt, (25, 90), 1, (255, 255, 255), 2)
     unwarped_withlines = add_text(params)
 
@@ -865,12 +866,12 @@ def find_lane_lines(binary_warped, orig):
     cv2.fillPoly(color_warp, np.int_([pts]), (0, 255, 0))
 
     left_curve_rad, right_curve_rad, dist_from_center =  \
-        get_real_world_measurements(binary_warped, leftx, lefty, rightx, righty)
+        get_real_world_measurements(binary_warped, leftx, lefty, rightx, righty, poly_left, poly_right)
 
     return color_warp, line_search_img, left_fitx, right_fitx, left_curve_rad, right_curve_rad, dist_from_center
 
 
-def get_real_world_measurements(binary_warped, leftx, lefty, rightx, righty):
+def get_real_world_measurements(binary_warped, leftx, lefty, rightx, righty, poly_left, poly_right):
     """Calculate real world measurements from pixel positions.
     
     Find the radius of curvature in real world dimensions. We are using a hard
@@ -883,6 +884,8 @@ def get_real_world_measurements(binary_warped, leftx, lefty, rightx, righty):
         binary_warped:  the binary, warped version of the current image
         leftx, lefty: points for left x and y
         rightx, righty: points for right x and y
+        poly_left: polynomial coeffients for left lane
+        poly_right: polynomial coeffients for right lane
 
     Returns:
         real world measurements in meters for curvature and distance of the car from lane center
@@ -892,15 +895,9 @@ def get_real_world_measurements(binary_warped, leftx, lefty, rightx, righty):
     # values based on US regulations for lane sizes & road markings, and assume that
     # all images are of flat terrain (not necessarily the case, but good enough for
     # this project).
-    
+
     ym_per_pix = 30/720  # meters per pixel in y dimension
     xm_per_pix = 3.7/750 # meters per pixel in x dimension
-
-    # Now we can get the distance from center in meters
-    true_center = binary_warped.shape[1] / 2
-    cur_center = rightx[0] - leftx[0] 
-    dist_from_center_px = true_center - cur_center
-    dist_from_center = dist_from_center_px * xm_per_pix
 
     poly_left_cr = np.polyfit( lefty * ym_per_pix, leftx * xm_per_pix, 2 )
     poly_right_cr = np.polyfit( righty * ym_per_pix, rightx * xm_per_pix, 2 )
@@ -913,6 +910,11 @@ def get_real_world_measurements(binary_warped, leftx, lefty, rightx, righty):
             poly_left_cr[1])**2)**1.5) / np.absolute(2*poly_left_cr[0]))
     right_curve_rad = (((1 + (2*poly_right_cr[0]*y_eval*ym_per_pix + \
             poly_right_cr[1])**2)**1.5) / np.absolute(2*poly_right_cr[0]))
+
+    # Now we can get the distance from center in meters
+    true_center = binary_warped.shape[1] / 2
+    dist_between_lanes = (np.mean(leftx) + np.mean(rightx)) / 2
+    dist_from_center = (true_center - dist_between_lanes) * xm_per_pix
 
     return left_curve_rad, right_curve_rad, dist_from_center
 
